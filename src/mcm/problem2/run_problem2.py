@@ -3,7 +3,7 @@ from .solver2 import solve_problem2
 from .export2 import export_result2
 
 def main():
-    hit, t_hit, pts, rects, pair_hit, speeds = solve_problem2(400)
+    hit, t_hit, pts, rects, pair_hit, speeds = solve_problem2(1200)
     if not hit:
         print('No collision within range')
         return

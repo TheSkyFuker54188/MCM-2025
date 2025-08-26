@@ -16,6 +16,9 @@ class ChainParams:
     v_head: float = 1.0  # m/s
     first_interval: float = len_head - 2 * hole_offset  # between head front & first body front handle
     body_interval: float = len_body - 2 * hole_offset
+    # 反馈: 有效刚性距离(欧氏) 使用 L1=2.86, 其余=1.65
+    eff_first: float = 2.86
+    eff_body: float = 1.65
 
     @property
     def handle_count(self) -> int:
@@ -33,3 +36,7 @@ class ChainParams:
             return self.body_interval
         # last segment to tail rear handle
         return self.len_body - self.hole_offset  # 2.2 - 0.275 = 1.925
+
+    def effective_distance(self, idx_from: int) -> float:
+        """刚体欧氏约束距离 L_i: 0->1 用 eff_first, 其余 eff_body (包含尾)"""
+        return self.eff_first if idx_from == 0 else self.eff_body

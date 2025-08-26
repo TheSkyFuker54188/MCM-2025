@@ -14,16 +14,79 @@ except ImportError:  # graceful fallback
 
 cp = ChainParams()
 
-# 预先计算每个把手到龙头前把手的弧长距离 (沿中心线顺序), 用于快速定位theta
-# handle 0 = head front
-# handle i 与 handle i-1 之间距离为 distance_between_handles(i-1)
-intervals = [cp.distance_between_handles(i) for i in range(cp.n_total)]  # len n_total
-cum_handle_s_offsets = [0.0]
-acc = 0.0
-for d in intervals:
-    acc += d
-    cum_handle_s_offsets.append(acc)
-# 长度 = n_total+1 = handle_count
+@njit(cache=True, fastmath=True)
+def newton_handle_theta_numba(x_prev: float, y_prev: float, L: float, b: float, theta_guess: float) -> float:
+    """Numba版本的牛顿迭代求解把手角度"""
+    if b <= 0:
+        return 0.01
+    
+    # 初值基于几何估算
+    dist_to_origin = math.sqrt(x_prev*x_prev + y_prev*y_prev)
+    estimated_r = max(dist_to_origin - L, 0.1)
+    th_init = max(estimated_r / b, 0.1)
+    
+    if theta_guess > 0.1:
+        th_init = min(theta_guess * 0.9, th_init)
+    
+    th = th_init
+    best_th = th
+    best_error = 1e10
+    
+    for iteration in range(60):
+        if th <= 0:
+            th = 0.01
+            
+        r = b * th
+        c = math.cos(th); s = math.sin(th)
+        X = r * c; Y = r * s
+        dx = X - x_prev; dy = Y - y_prev
+        f = dx*dx + dy*dy - L*L
+        
+        error = abs(f)
+        if error < best_error:
+            best_error = error
+            best_th = th
+            
+        if error < 1e-8:
+            return th
+            
+        dX = b * c - r * s
+        dY = b * s + r * c
+        df = 2*dx*dX + 2*dy*dY
+        
+        if abs(df) < 1e-15:
+            # 梯度太小，扰动
+            if iteration % 2 == 0:
+                th = th + 0.01
+            else:
+                th = th - 0.01
+            continue
+            
+        step = f / df
+        # 限制步长
+        if abs(step) > 0.3:
+            if step > 0:
+                step = 0.3
+            else:
+                step = -0.3
+                
+        th_new = th - step
+        
+        if th_new <= 0:
+            th_new = th * 0.5
+            
+        th = th_new
+        
+    return max(best_th, 0.01)
+
+def newton_handle_theta(x_prev: float, y_prev: float, L: float, theta_guess: float) -> float:
+    """给定上一把手坐标与刚性距离 L, 求当前把手 theta 使 (r cosθ - x_prev)^2 + (r sinθ - y_prev)^2 = L^2.
+    r = b θ, 其中 b 由 spiral 模块常量给出 (全局 sp). 直接利用 spiral_pos/其导数。
+    使用牛顿迭代; theta_guess 可用上一把手 theta 或略小值。
+    """
+    from .spiral import sp
+    b = sp.b
+    return newton_handle_theta_numba(x_prev, y_prev, L, b, theta_guess)
 
 
 def solve_problem1(T: int = 300):
@@ -57,17 +120,26 @@ def solve_problem1(T: int = 300):
         vx[ti, 0] = v_head * tx0
         vy[ti, 0] = v_head * ty0
 
-        # 2. 其他把手位置
+        # 2. 其他把手位置 (刚体欧氏约束牛顿)
         for hi in range(1, n_handles):
-            s_i = s_head - cum_handle_s_offsets[hi]
-            if s_i <= 0:
-                theta_i = 0.0
-            else:
-                guess_i = theta[ti, hi-1]
-                theta_i = spiral_arc_length_inv(s_i, guess_i)
+            L = cp.effective_distance(hi-1)
+            # 使用改进的numba版本
+            from .spiral import sp
+            theta_i = newton_handle_theta_numba(x[ti, hi-1], y[ti, hi-1], L, sp.b, theta[ti, hi-1])
+            
+            # 验证结果合理性
+            if theta_i <= 0:
+                # 回退策略：基于前一把手角度的保守估计
+                theta_i = max(theta[ti, hi-1] * 0.95, 0.1)
+                
             theta[ti, hi] = theta_i
             xi, yi = spiral_pos(theta_i)
             x[ti, hi], y[ti, hi] = xi, yi
+            
+            # 距离验证断言（反馈要求）
+            actual_dist = math.hypot(xi - x[ti, hi-1], yi - y[ti, hi-1])
+            if abs(actual_dist - L) > 1e-6:
+                print(f"警告: 时刻{t}s 把手{hi} 距离误差 {abs(actual_dist - L):.2e}m (期望{L}m, 实际{actual_dist:.6f}m)")
 
         # 3. 速度递推
         tangents = [spiral_tangent_unit(theta[ti, h]) for h in range(n_handles)]
@@ -95,7 +167,31 @@ def solve_problem1(T: int = 300):
                 vy[ti, hi] = speed[ti, hi] * t_cur[1]
 
     return times, x, y, speed, vx, vy, theta
-    return times, x, y, speed, vx, vy
+
+def validate_results(times, x, y, speed, sample_times=[10, 50, 100]):
+    """验证计算结果的物理一致性（反馈要求）"""
+    print("=== 第一问结果验证 ===")
+    cp = ChainParams()
+    for t in sample_times:
+        if t < len(times):
+            print(f"\n时刻 {t}s:")
+            # 距离验证
+            max_dist_error = 0
+            for i in range(1, cp.handle_count):
+                expected_L = cp.effective_distance(i-1)
+                actual_dist = math.hypot(x[t,i] - x[t,i-1], y[t,i] - y[t,i-1])
+                error = abs(actual_dist - expected_L)
+                max_dist_error = max(max_dist_error, error)
+            print(f"  最大距离误差: {max_dist_error:.2e}m")
+            
+            # 速度合理性检查
+            speeds_t = speed[t, :]
+            print(f"  速度范围: {speeds_t.min():.3f} ~ {speeds_t.max():.3f} m/s")
+            abnormal_speeds = np.sum((speeds_t < 0) | (speeds_t > 10))
+            if abnormal_speeds > 0:
+                print(f"  异常速度数量: {abnormal_speeds}")
+                
+    print("=== 验证完成 ===\n")
 
 if __name__ == "__main__":
     times, x, y, v, vx, vy, theta = solve_problem1(10)
