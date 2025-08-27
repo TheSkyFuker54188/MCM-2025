@@ -46,7 +46,7 @@ def candidate_pairs_numba(theta_array, n_rects):
         ti = theta_array[i]
         low = ti - 3 * math.pi
         upper = ti - math.pi
-        for j in range(i + 1, n_rects):
+        for j in range(0, i):
             tj = theta_array[j]
             if low <= tj <= upper:
                 pairs.append((i, j))

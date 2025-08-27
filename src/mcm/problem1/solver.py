@@ -16,68 +16,54 @@ cp = ChainParams()
 
 @njit(cache=True, fastmath=True)
 def newton_handle_theta_numba(x_prev: float, y_prev: float, L: float, b: float, theta_guess: float) -> float:
-    """Numba版本的牛顿迭代求解把手角度"""
-    if b <= 0:
-        return 0.01
+    """Numba版本的牛顿迭代求解把手角度
     
-    # 初值基于几何估算
-    dist_to_origin = math.sqrt(x_prev*x_prev + y_prev*y_prev)
-    estimated_r = max(dist_to_origin - L, 0.1)
-    th_init = max(estimated_r / b, 0.1)
+    修复问题：
+    1. 迭代直到收敛而不是固定次数
+    2. 初始解选取：后面板凳的极角比前面大，所以用 theta_guess + 0.5
+    """
+    th = theta_guess + 0.5  # 后面板凳的极角应该比前面的大
     
-    if theta_guess > 0.1:
-        th_init = min(theta_guess * 0.9, th_init)
+    max_iter = 150  # 最大迭代次数防止无限循环
+    tolerance = 1e-12  # 收敛容差
     
-    th = th_init
-    best_th = th
-    best_error = 1e10
-    
-    for iteration in range(60):
-        if th <= 0:
-            th = 0.01
-            
+    for iteration in range(max_iter):
         r = b * th
         c = math.cos(th); s = math.sin(th)
         X = r * c; Y = r * s
         dx = X - x_prev; dy = Y - y_prev
         f = dx*dx + dy*dy - L*L
         
-        error = abs(f)
-        if error < best_error:
-            best_error = error
-            best_th = th
-            
-        if error < 1e-8:
+        # 检查是否收敛
+        if abs(f) < tolerance:
             return th
             
+        # 计算梯度
         dX = b * c - r * s
         dY = b * s + r * c
         df = 2*dx*dX + 2*dy*dY
         
+        # 避免除零
         if abs(df) < 1e-15:
-            # 梯度太小，扰动
-            if iteration % 2 == 0:
-                th = th + 0.01
-            else:
-                th = th - 0.01
-            continue
+            break
             
-        step = f / df
-        # 限制步长
-        if abs(step) > 0.3:
-            if step > 0:
-                step = 0.3
-            else:
-                step = -0.3
-                
-        th_new = th - step
+        # 牛顿步
+        delta = f / df
+        th_new = th - delta
         
+        # 确保theta保持正值且合理
         if th_new <= 0:
-            th_new = th * 0.5
+            th_new = th * 0.5  # 如果步长过大导致负值，减半
+        elif th_new > th * 3:  # 防止步长过大
+            th_new = th * 1.5
             
         th = th_new
         
-    return max(best_th, 0.01)
+        # 检查步长是否足够小（另一种收敛判据）
+        if abs(delta) < tolerance:
+            break
+    
+    return max(th, 0.0)
 
 def newton_handle_theta(x_prev: float, y_prev: float, L: float, theta_guess: float) -> float:
     """给定上一把手坐标与刚性距离 L, 求当前把手 theta 使 (r cosθ - x_prev)^2 + (r sinθ - y_prev)^2 = L^2.
@@ -123,15 +109,7 @@ def solve_problem1(T: int = 300):
         # 2. 其他把手位置 (刚体欧氏约束牛顿)
         for hi in range(1, n_handles):
             L = cp.effective_distance(hi-1)
-            # 使用改进的numba版本
-            from .spiral import sp
-            theta_i = newton_handle_theta_numba(x[ti, hi-1], y[ti, hi-1], L, sp.b, theta[ti, hi-1])
-            
-            # 验证结果合理性
-            if theta_i <= 0:
-                # 回退策略：基于前一把手角度的保守估计
-                theta_i = max(theta[ti, hi-1] * 0.95, 0.1)
-                
+            theta_i = newton_handle_theta(x[ti, hi-1], y[ti, hi-1], L, theta[ti, hi-1])
             theta[ti, hi] = theta_i
             xi, yi = spiral_pos(theta_i)
             x[ti, hi], y[ti, hi] = xi, yi

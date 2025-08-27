@@ -16,26 +16,56 @@ cp = ChainParams()
 
 @njit(cache=True, fastmath=True)
 def _newton_handle_theta_numba(x_prev, y_prev, L, b, theta_guess):
-    th = theta_guess
+    """修复的牛顿迭代求解把手角度
+    
+    修复问题：
+    1. 迭代直到收敛而不是固定次数  
+    2. 初始解选取：后面板凳的极角比前面大
+    """
+    th = theta_guess + 0.5  # 后面板凳的极角应该比前面的大
     if th < 0:
-        th = 0.0
-    for _ in range(30):
+        th = 0.1  # 确保正值
+        
+    max_iter = 100
+    tolerance = 1e-12
+    
+    for iteration in range(max_iter):
         r = b * th
         c = math.cos(th); s = math.sin(th)
         X = r * c; Y = r * s
         dx = X - x_prev; dy = Y - y_prev
         f = dx*dx + dy*dy - L*L
-        if abs(f) < 1e-12:
+        
+        # 检查是否收敛
+        if abs(f) < tolerance:
             return th
+            
+        # 计算梯度
         dX = b * c - r * s
         dY = b * s + r * c
         df = 2*dx*dX + 2*dy*dY
-        if df == 0:
+        
+        # 避免除零
+        if abs(df) < 1e-15:
             break
-        th -= f/df
-        if th < 0:
-            th = 0.0
-    return th
+            
+        # 牛顿步
+        delta = f / df
+        th_new = th - delta
+        
+        # 确保theta保持正值且合理
+        if th_new <= 0:
+            th_new = th * 0.5
+        elif th_new > th * 3:
+            th_new = th * 1.5
+            
+        th = th_new
+        
+        # 检查步长收敛
+        if abs(delta) < tolerance:
+            break
+    
+    return max(th, 0.0)
 
 # 预计算刚体距离数组
 EFFECTIVE_L = np.array([cp.effective_distance(i) for i in range(cp.handle_count-1)], dtype=np.float64)
@@ -61,7 +91,7 @@ def _compute_frame(t: float, prev_thetas=None):
     for i in range(1, cp.handle_count):
         L = EFFECTIVE_L[i-1]
         guess = thetas[-1]  # 邻接初值
-        th_i = _newton_handle_theta_numba(xs[i-1], ys[i-1], L, b, guess-0.3)
+        th_i = _newton_handle_theta_numba(xs[i-1], ys[i-1], L, b, guess)  # 移除-0.3，函数内部处理
         x_i, y_i = spiral_pos(th_i)
         thetas.append(th_i)
         xs.append(x_i); ys.append(y_i)

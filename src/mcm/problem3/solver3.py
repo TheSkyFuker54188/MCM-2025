@@ -7,7 +7,10 @@
  4. 在给定 p 下运行碰撞搜索(最大时间 t_max 可设 400 或更大以保证充分缠绕)。
  5. 得到停止时刻 (碰撞时刻或 t_max) 的龙头半径 r_head = b * theta_head(t_stop)。
  6. 判定 r_head 与 R=4.5: 若 r_head <= R 代表成功进入; 目标是求最小 p 仍能进入。
- 7. 采用逐级减步长搜索: 从 p_start=0.55 (题给初值) 出发, 若其已经进入则向下搜索; 若未进入则向上扩大直到进入, 然后逐级缩小步长 (0.1,0.01,0.001)。
+ 7. 采用逐级减步长搜索: 从 p_start=0.55 (题给初值) 出发, 若其已经进入则向下搜索; 若未进入则向上扩大直到进入, 然后逐级缩小步长 (0if __name__ == "__main__":
+    p_min, feasible, samples = search_p_min()
+    print("p_min=", p_min, "feasible=", feasible)
+    print(f"总共测试了 {len(samples)} 个螺距值")0.01,0.001)。
 
 注意: 物理描述里 “l0<R 则减小螺距 p” (更紧 -> 更靠中心)。与上述一致。
 """
@@ -37,18 +40,15 @@ try:
     
     @njit
     def _newton_handle_theta_numba(x_prev: float, y_prev: float, L: float, b: float, guess: float):
-        """numba加速的牛顿迭代求解把手角度，几何初始化策略"""
-        # 几何初始化: 先根据前一个位置和距离约束进行合理估计
-        r_prev = (x_prev*x_prev + y_prev*y_prev)**0.5
-        if r_prev > 0:
-            # 估计新半径应该在 r_prev ± L 范围内
-            r_target = max(0.1, r_prev - L * 0.8)  # 偏向内侧
-            theta_init = r_target / b if b > 1e-10 else guess
-        else:
-            theta_init = guess
+        """numba加速的牛顿迭代求解把手角度
+        """
+        theta_init = guess + 0.5 if guess > 0 else 0.5
         
         theta = theta_init
-        for _ in range(50):  # 最大迭代次数
+        max_iter = 100
+        tolerance = 1e-12
+        
+        for iteration in range(max_iter):
             # 螺线位置
             x = b * theta * math.cos(theta)
             y = b * theta * math.sin(theta)
@@ -58,7 +58,7 @@ try:
             dy = y - y_prev
             f = dx*dx + dy*dy - L*L
             
-            if abs(f) < 1e-12:  # 收敛
+            if abs(f) < tolerance:  # 收敛
                 break
             
             # 梯度计算
@@ -74,15 +74,21 @@ try:
                 break
             
             delta = f / df_dt
-            theta = theta - delta
+            theta_new = theta - delta
             
-            # 防止theta过度偏离合理范围
-            if theta < 0:
-                theta = 0.1
-            elif theta > 100:
-                theta = 100
+            # 确保theta保持正值且合理
+            if theta_new <= 0:
+                theta_new = theta * 0.5
+            elif theta_new > theta * 3:
+                theta_new = theta * 1.5
+                
+            theta = theta_new
+            
+            # 检查步长收敛
+            if abs(delta) < tolerance:
+                break
         
-        return theta
+        return max(theta, 0.0)
     
     # 也定义其他numba函数
     @njit
@@ -115,7 +121,8 @@ try:
 except ImportError:
     # 无numba时的备选实现
     def _newton_handle_theta_numba(x_prev: float, y_prev: float, L: float, b: float, guess: float):
-        return newton_handle_theta(x_prev, y_prev, L, guess, b)
+        # newton_handle_theta不需要b参数，它会从spiral模块获取
+        return newton_handle_theta(x_prev, y_prev, L, guess)
     
     def _spiral_pos_local(theta: float, b: float):
         return spiral_module.spiral_pos(theta, b)
@@ -126,68 +133,6 @@ except ImportError:
     def njit(*args, **kwargs):
         def wrap(f): return f
         return wrap
-
-@njit(cache=True, fastmath=True)
-def _newton_handle_theta_numba(x_prev: float, y_prev: float, L: float, b: float, theta_guess: float) -> float:
-    """Numba版本的牛顿迭代求解把手角度"""
-    if b <= 0:
-        return 0.01
-    
-    # 初值基于几何估算
-    dist_to_origin = math.sqrt(x_prev*x_prev + y_prev*y_prev)
-    estimated_r = max(dist_to_origin - L, 0.1)
-    th_init = max(estimated_r / b, 0.1)
-    
-    if theta_guess > 0.1:
-        th_init = min(theta_guess * 0.9, th_init)
-    
-    th = th_init
-    best_th = th
-    best_error = 1e10
-    
-    for iteration in range(60):
-        if th <= 0:
-            th = 0.01
-            
-        r = b * th
-        c = math.cos(th); s = math.sin(th)
-        X = r * c; Y = r * s
-        dx = X - x_prev; dy = Y - y_prev
-        f = dx*dx + dy*dy - L*L
-        
-        error = abs(f)
-        if error < best_error:
-            best_error = error
-            best_th = th
-            
-        if error < 1e-8:
-            return th
-            
-        # 牛顿步长
-        dX = b * c - r * s
-        dY = b * s + r * c
-        df = 2*dx*dX + 2*dy*dY
-        
-        if abs(df) < 1e-15:
-            break
-            
-        step = f / df
-        th_new = th - step
-        
-        # 约束到合理范围
-        if th_new <= 0:
-            th_new = th * 0.5
-        elif th_new > th * 2:
-            th_new = th * 1.1
-            
-        th = th_new
-        
-        # 防止振荡
-        if iteration > 30 and error > 1e-4:
-            th = best_th
-            break
-    
-    return max(best_th, 0.01)
 
 def build_interpolators(T:int, p:float):
     # 为特定螺距p构建采样函数，不依赖全局状态
@@ -337,85 +282,95 @@ def evaluate_pitch(p: float, t_max: float = 800.0):
         print(f"无碰撞@{t_max}s, r_head={r_head:.2f}m, 进入={entered}")
         return entered, r_head, t_stop, False, None
 
-def search_p_min(p0: float = 0.55):
-    """改进的网格搜索: 逐步细化找到最小可行螺距
+def search_p_min(p_start: float = 0.20):
+    """改进的网格搜索算法：找到最小可行螺距
+    
+    题目要求：找到最小的螺距p，使得板凳能进入且龙头半径不超过4.5m
+    采用从可能的临界区域开始的网格搜索，逐步细化步长
+    
     返回(p_min, feasible, samples)
     """
     samples = []
     
-    # 步骤1: 找到一个可行的起始点
-    print("步骤1: 评估初始螺距", p0)
-    ent, r_head, t_stop, coll, pair = evaluate_pitch(p0)
-    samples.append((p0, ent, r_head, t_stop, coll))
+    print(f"开始网格搜索，起始点: p={p_start}")
     
-    if not ent:
-        print("初始螺距无法进入，向下搜索可行点...")
-        p_current = p0
-        while not ent and p_current > 0.05:
-            p_current = round(p_current - 0.1, 3)
-            ent, r_head, t_stop, coll, pair = evaluate_pitch(p_current)
-            samples.append((p_current, ent, r_head, t_stop, coll))
+    # 首先确定搜索区间 - 从较大的螺距开始向下搜索
+    step_sizes = [0.05, 0.01, 0.001]  # 更粗的初始步长
+    
+    # 步骤1: 粗搜索找到可行/不可行的边界
+    print("步骤1: 粗搜索确定边界区间")
+    
+    # 向上找到第一个不可行点
+    p_test = p_start
+    p_infeasible = None
+    
+    while p_test <= 1.0:
+        p_current = round(p_test, 3)
+        ent, r_head, t_stop, coll, pair = evaluate_pitch(p_current)
+        samples.append((p_current, ent, r_head, t_stop, coll))
+        
+        print(f"  测试 p={p_current}: 可行={ent}, 龙头半径={r_head:.3f}m")
         
         if not ent:
-            return p_current, False, samples
-        p_feasible = p_current
-    else:
-        p_feasible = p0
+            p_infeasible = p_current
+            print(f"  找到第一个不可行点: p={p_infeasible}")
+            break
+        
+        p_test += step_sizes[0]
     
-    # 步骤2: 逐级网格搜索，找到最大的可行螺距
-    step_sizes = [0.1, 0.01, 0.001]
-    print(f"步骤2: 逐级网格搜索 (步长: {step_sizes})")
+    if p_infeasible is None:
+        print("未找到不可行边界，所有测试的螺距都可行")
+        return p_start, True, samples
+    
+    # 现在从不可行点向下搜索找到最后一个可行点
+    print(f"步骤2: 在区间 [{p_start}, {p_infeasible}] 内精细搜索")
     
     for level, step in enumerate(step_sizes):
-        print(f"  级别{level+1}: 步长={step}")
+        if level == 0:
+            continue  # 第一级已经在步骤1完成
+            
+        print(f"级别{level+1}: 步长={step}")
         
-        # 在当前级别上，找到最大可行值和最小不可行值之间的边界
-        p_min_infeasible = None
+        # 在当前区间内搜索
+        search_start = max(p_start, p_infeasible - step_sizes[level-1])
+        search_end = p_infeasible
         
-        # 向上搜索找到第一个不可行点
-        p_test = p_feasible + step
-        while p_test <= 2.0:  # 合理的上限
-            p_test = round(p_test, 3)
+        p_current = search_start
+        last_feasible = None
+        
+        while p_current < search_end:
+            p_test = round(p_current, 4)
             ent, r_head, t_stop, coll, pair = evaluate_pitch(p_test)
             samples.append((p_test, ent, r_head, t_stop, coll))
             
+            print(f"    测试 p={p_test}: 可行={ent}, 龙头半径={r_head:.3f}m")
+            
             if ent:
-                p_feasible = p_test  # 更新可行边界
-                p_test += step
+                last_feasible = p_test
             else:
-                p_min_infeasible = p_test  # 找到第一个不可行点
+                # 找到新的不可行边界，更新搜索区间
+                p_infeasible = p_test
                 break
-        
-        if p_min_infeasible is None:
-            # 没有找到不可行边界，当前精度下p_feasible就是答案
-            break
-        
-        # 现在我们有边界: p_feasible (可行) 和 p_min_infeasible (不可行)
-        # 在下一级别上，我们只需要在这个小区间内搜索
-        
-        # 为下一级别准备: 在边界区间内进行精细搜索
-        if level < len(step_sizes) - 1:
-            next_step = step_sizes[level + 1]
-            # 在 [p_feasible, p_min_infeasible] 区间内用更细的步长搜索
-            p_test = p_feasible + next_step
-            new_feasible = p_feasible
             
-            while p_test < p_min_infeasible:
-                p_test = round(p_test, 4)
-                ent, r_head, t_stop, coll, pair = evaluate_pitch(p_test)
-                samples.append((p_test, ent, r_head, t_stop, coll))
-                
-                if ent:
-                    new_feasible = p_test
-                    p_test += next_step
-                else:
-                    break
-            
-            p_feasible = new_feasible
+            p_current += step
         
-        print(f"    当前可行上界: {p_feasible}")
+        if last_feasible is not None:
+            # 为下一级准备更精确的区间
+            if level < len(step_sizes) - 1:
+                p_start = max(p_start, last_feasible - step)
+                p_infeasible = min(p_infeasible, last_feasible + step)
     
-    return round(p_feasible, 3), True, samples
+    # 找到所有可行的样本中最大的螺距（最接近边界的）
+    feasible_samples = [s for s in samples if s[1]]  # 只保留可行的样本
+    
+    if feasible_samples:
+        p_min = max(s[0] for s in feasible_samples)  # 最大的可行螺距
+        p_min = round(p_min, 3)
+        print(f"网格搜索完成，最小可行螺距: p_min = {p_min}")
+        return p_min, True, samples
+    else:
+        print("网格搜索未找到可行解")
+        return p_start, False, samples
 
 def export_result3(p_min: float, detail_rows, path: str):
     import pandas as pd
@@ -423,7 +378,7 @@ def export_result3(p_min: float, detail_rows, path: str):
     validation_data = []
     test_values = [p_min - 0.001, p_min, p_min + 0.001]
     for p_test in test_values:
-        if p_test >= 0.05:
+        if p_test > 0.01:  # 确保螺距为正值且合理
             entered, r_head, t_stop, collided, pair = evaluate_pitch(p_test)
             validation_data.append({
                 'p': p_test,
@@ -436,8 +391,19 @@ def export_result3(p_min: float, detail_rows, path: str):
     
     df = pd.DataFrame(detail_rows)
     validation_df = pd.DataFrame(validation_data)
+    
+    # 检查validation_data是否有足够的元素
+    validation_passed = False
+    if len(validation_data) >= 2:
+        # 找到p_min对应的条目
+        p_min_entry = next((item for item in validation_data if abs(item['p'] - p_min) < 1e-6), None)
+        p_plus_entry = next((item for item in validation_data if item['p'] > p_min), None)
+        
+        if p_min_entry and p_plus_entry:
+            validation_passed = p_min_entry['entered'] and not p_plus_entry['entered']
+    
     summary = pd.DataFrame({"key":["p_min", "validation_passed"], 
-                          "value":[p_min, validation_data[1]['entered'] and not validation_data[2]['entered']]})
+                          "value":[p_min, validation_passed]})
     
     with pd.ExcelWriter(path, engine='openpyxl') as w:
         summary.to_excel(w, sheet_name='summary', index=False)
@@ -459,5 +425,14 @@ def compute_with_logging(p_list):
     return rows
 
 if __name__ == "__main__":
-    p_min, feasible = search_p_min()
+    p_min, feasible, samples = search_p_min()
     print("p_min=", p_min, "feasible=", feasible)
+    print(f"总共测试了 {len(samples)} 个螺距值")
+    
+    # 生成详细结果
+    if feasible:
+        # 将samples转换为适合export的格式
+        p_list = [s[0] for s in samples]  # 提取螺距值
+        detail_rows = compute_with_logging(p_list)
+        export_result3(p_min, detail_rows, "result3.xlsx")
+        print(f"结果已导出到 result3.xlsx")
