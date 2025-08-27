@@ -5,65 +5,105 @@ def grid_search():
     print("开始第三问网格搜索最小螺距...")
     levels = [0.1, 0.01, 0.001]
     records = []
-    # 方向: 如果 0.55 已进入则向下，不进入则先向下直到进入（题目期望最小螺距）
+    
     p_start = 0.55
     print(f"步骤1: 评估初始螺距 {p_start}")
     entered, r_head, t_stop, collided, pair = evaluate_pitch(p_start)
     records.append(dict(p=p_start, entered=entered, r_head=r_head, t_stop=t_stop, collided=collided))
+    
     if not entered:
-        print("初始螺距无法进入，向下搜索可行点...")
-        p = p_start - 0.1
-        while p >= 0.05:
-            e, r, ts, col, pr = evaluate_pitch(round(p,3))
-            records.append(dict(p=round(p,3), entered=e, r_head=r, t_stop=ts, collided=col))
+        print("初始螺距无法进入，向上搜索找到第一个可行点...")
+        # 使用更大范围的搜索
+        search_points = [
+            # 小步长搜索较小的螺距
+            *[round(0.55 + i*0.05, 2) for i in range(1, 30)],  # 0.6 to 2.0
+            # 中等步长搜索中等螺距
+            *[round(2.0 + i*0.2, 2) for i in range(1, 16)],    # 2.2 to 5.0
+            # 大步长搜索较大的螺距
+            *[round(5.0 + i*0.5, 2) for i in range(1, 21)],    # 5.5 to 15.0
+            # 更大步长搜索非常大的螺距
+            *[round(15.0 + i*1.0, 2) for i in range(1, 11)]    # 16.0 to 25.0
+        ]
+        
+        found_feasible = False
+        for p in search_points:
+            e, r, ts, col, pr = evaluate_pitch(p)
+            records.append(dict(p=p, entered=e, r_head=r, t_stop=ts, collided=col))
+            
             if e:
                 entered = True
                 p_start = p
+                print(f"找到第一个可行螺距: {p_start}m")
+                found_feasible = True
                 break
-            p -= 0.1
-        if not entered:
+        
+        if not found_feasible:
             print("未找到可行螺距!")
             return None, records
     
     print(f"步骤2: 逐级网格搜索 (步长: {levels})")
-    # 逐级减步长确定临界
-    p_feasible = p_start  # 当前最大可行
+    # 现在需要找到最小的可行螺距（在能进入的前提下螺距越小越好）
+    p_feasible = p_start  # 当前已知的可行螺距
+    
+    # 向下搜索找到不可行的下界
+    print(f"  寻找不可行下界...")
+    p_lower = None
+    step = 0.05
+    p_try = p_feasible - step
+    
+    while p_try >= 0.05:
+        e, r, ts, col, pr = evaluate_pitch(p_try)
+        records.append(dict(p=p_try, entered=e, r_head=r, t_stop=ts, collided=col))
+        
+        if not e:
+            p_lower = p_try
+            print(f"  找到不可行下界: {p_lower}m")
+            break
+        else:
+            p_feasible = p_try  # 更新为更小的可行值
+            p_try -= step
+    
+    if p_lower is None:
+        print(f"  未找到不可行下界，当前最小可行螺距: {p_feasible}m")
+        p_lower = max(0.05, p_feasible - 0.1)  # 设置一个人为的下界
+    
+    # 二分搜索找到精确的临界点
+    p_upper = p_feasible
+    
     for level_idx, step in enumerate(levels):
         print(f"  级别{level_idx+1}: 步长={step}")
-        p_try = p_feasible + step
-        # 向上扩展直到不可行
-        while True:
-            e, r, ts, col, pr = evaluate_pitch(round(p_try,3))
-            records.append(dict(p=round(p_try,3), entered=e, r_head=r, t_stop=ts, collided=col))
+        
+        # 二分搜索找到临界点
+        while p_upper - p_lower > step:
+            p_mid = (p_upper + p_lower) / 2
+            p_mid = round(p_mid, 6)
+            
+            e, r, ts, col, pr = evaluate_pitch(p_mid)
+            records.append(dict(p=p_mid, entered=e, r_head=r, t_stop=ts, collided=col))
+            
             if e:
-                p_feasible = round(p_try,3)
-                p_try += step
-                if p_try > 2.5:  # 安全上界
-                    break
+                p_upper = p_mid  # 可行，向下搜索
             else:
-                break
-        # 下一层细化：从当前 p_feasible 向下扫描找到仍可行的最小 p (step 分辨率)
-        scan_start = p_feasible
-        p_scan = scan_start - step
-        last_good = scan_start
-        while p_scan >= 0.05 - 1e-12:
-            e, r, ts, col, pr = evaluate_pitch(round(p_scan,3))
-            records.append(dict(p=round(p_scan,3), entered=e, r_head=r, t_stop=ts, collided=col))
-            if e:
-                last_good = round(p_scan,3)
-                p_scan -= step
-            else:
-                break
-        p_feasible = last_good
-        print(f"    当前可行上界: {p_feasible}")
+                p_lower = p_mid  # 不可行，向上搜索
+        
+        print(f"    当前区间: [{p_lower}, {p_upper}]")
     
-    p_min = round(p_feasible,3)
+    p_min = round(p_upper, 3)  # 取可行的最小值
     print(f"步骤3: 验证临界性 p_min={p_min}")
-    # 验证
-    e_plus, *_ = evaluate_pitch(p_min + 0.001)
-    e_minus, *_ = evaluate_pitch(max(0.05, p_min - 0.001))
-    records.append(dict(p=p_min+0.001, entered=e_plus, note='p_min+0.001'))
-    records.append(dict(p=p_min-0.001, entered=e_minus, note='p_min-0.001'))
+    
+    # 验证：p_min可行，p_min-0.001不可行
+    e_curr, r_curr, *_ = evaluate_pitch(p_min)
+    e_minus, r_minus, *_ = evaluate_pitch(p_min - 0.001)
+    
+    records.append(dict(p=p_min, entered=e_curr, r_head=r_curr, note='p_min'))
+    records.append(dict(p=p_min-0.001, entered=e_minus, r_head=r_minus, note='p_min-0.001'))
+    
+    print(f"  p_min={p_min}: 进入={e_curr}, 距离={r_curr:.3f}m")
+    print(f"  p_min-0.001={p_min-0.001}: 进入={e_minus}, 距离={r_minus:.3f}m")
+    
+    validation_passed = e_curr and not e_minus
+    print(f"  验证结果: {'通过' if validation_passed else '失败'}")
+    
     return p_min, records
 
 def main():
